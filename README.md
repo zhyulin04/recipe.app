@@ -1,36 +1,136 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Recipe Box
 
-## Getting Started
+A full-stack recipe management app where users can register, log in, and
+manage their own recipes (browse, create, edit, delete). Built as a learning
+project around modern Next.js (App Router), Prisma + PostgreSQL, Tailwind, and
+custom JWT auth.
 
-First, run the development server:
+## Tech stack
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- **Framework**: Next.js 16 (App Router, Turbopack, React 19)
+- **Database**: PostgreSQL via Prisma 7 ORM (driver adapter `@prisma/adapter-pg`)
+- **Auth**: Custom JWT with [`jose`](https://github.com/panva/jose), stored in
+  an `httpOnly` cookie. Passwords hashed with `bcryptjs`.
+- **Styling**: Tailwind CSS v4
+- **Route protection**: Next.js 16 **Proxy** (the renamed `middleware.ts`)
+
+## Project structure
+
+```
+app/
+  api/
+    auth/{register,login,logout}/route.ts
+    recipes/route.ts
+    recipes/[id]/route.ts
+  components/{Navbar,LogoutButton}.tsx
+  login/{page.tsx,LoginForm.tsx}
+  register/{page.tsx,RegisterForm.tsx}
+  recipes/
+    page.tsx                        # list
+    create/page.tsx                 # protected
+    [id]/page.tsx                   # details
+    [id]/edit/page.tsx              # protected, owner-only
+    [id]/DeleteRecipeButton.tsx
+    RecipeForm.tsx                  # shared create/edit form
+  layout.tsx
+  page.tsx                          # home
+lib/
+  auth.ts                           # signToken, verifyToken, getSession
+  prisma.ts                         # Prisma client singleton
+prisma/
+  schema.prisma                     # User + Recipe models
+proxy.ts                            # route protection (formerly middleware)
+prisma.config.ts                    # Prisma 7 datasource & migrations config
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Running locally
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 1. Prerequisites
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+You need a running PostgreSQL instance. Locally, you can use Docker:
 
-## Learn More
+```bash
+docker run --name recipe-pg -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=recipe_app -p 5432:5432 -d postgres:16
+```
 
-To learn more about Next.js, take a look at the following resources:
+### 2. Configure environment
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Copy `.env.example` to `.env` and fill in:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```env
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/recipe_app?schema=public"
+JWT_SECRET="<a long random string, at least 32 chars>"
+```
 
-## Deploy on Vercel
+Generate a secret quickly with:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+openssl rand -hex 32
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### 3. Install and migrate
+
+```bash
+pnpm install
+pnpm exec prisma migrate dev --name init
+pnpm exec prisma generate
+```
+
+### 4. Start the dev server
+
+```bash
+pnpm dev
+```
+
+Open <http://localhost:3000>.
+
+## Main user flow
+
+1. **Register** at `/register` — name, email, valid email format, password ≥ 6
+   chars. On success, a JWT is issued in an `httpOnly` cookie and you land on
+   `/`.
+2. **Browse** recipes at `/recipes` — public, responsive grid with title,
+   cuisine, difficulty, cooking time, author.
+3. **Create** a recipe at `/recipes/create` — protected by the proxy; redirects
+   to `/login` if not signed in.
+4. **View** at `/recipes/:id` — public details page. If you are the author you
+   see Edit and Delete actions.
+5. **Edit** at `/recipes/:id/edit` — protected by the proxy; the page also
+   server-side checks ownership and redirects non-owners back to the detail
+   page. The API enforces ownership too (returns 403).
+6. **Logout** from the navbar — clears the JWT cookie.
+
+## API summary
+
+| Method | Route                  | Auth   | Notes                                  |
+| ------ | ---------------------- | ------ | -------------------------------------- |
+| POST   | `/api/auth/register`   | -      | Validates input, sets JWT cookie       |
+| POST   | `/api/auth/login`      | -      | Sets JWT cookie on success             |
+| POST   | `/api/auth/logout`     | -      | Clears JWT cookie                      |
+| GET    | `/api/recipes`         | -      | Returns all recipes with author        |
+| POST   | `/api/recipes`         | yes    | Creates recipe for current user        |
+| GET    | `/api/recipes/[id]`    | -      | Returns one recipe with author         |
+| PUT    | `/api/recipes/[id]`    | yes \* | Updates if user owns the recipe        |
+| DELETE | `/api/recipes/[id]`    | yes \* | Deletes if user owns the recipe        |
+
+\* Returns `401` if no valid session, `403` on ownership mismatch, `404` if not
+found.
+
+## Notes on Next.js 16
+
+- `middleware.ts` was renamed to `proxy.ts`. The file at the project root
+  exports a `proxy` function and a `config.matcher`.
+- Dynamic page params and route handler params are now async
+  (`await props.params`).
+- `RouteContext<'/api/recipes/[id]'>` and `PageProps<'/recipes/[id]'>` are
+  globally available helpers generated by `next typegen`.
+
+## Notes on Prisma 7
+
+- `datasource db {}` no longer accepts a `url` field. Connection settings
+  live in `prisma.config.ts`, which the CLI reads for `migrate dev`,
+  `db push`, etc.
+- The runtime `PrismaClient` is created with a **driver adapter** instead of
+  the bundled engine. We use `@prisma/adapter-pg` (the `node-postgres`
+  adapter), constructed from `process.env.DATABASE_URL`. See `lib/prisma.ts`.
